@@ -82,3 +82,19 @@ def delete(name: str) -> None:
     if data["last"] == name:
         data["last"] = None
     _write(data)
+
+
+def merge(other: dict) -> int:
+    """내려받아 둔 groups.json 내용을 합칩니다. 가져온 그룹 수를 돌려줍니다."""
+    incoming = other["groups"]
+    if not isinstance(incoming, dict):
+        raise TypeError("groups must be a dict")
+    data = _read()
+    data["groups"].update(incoming)
+    _write(data)
+    return len(incoming)
+
+
+def export() -> dict:
+    """내려받기용: 저장된 그룹 전체."""
+    return _read()
