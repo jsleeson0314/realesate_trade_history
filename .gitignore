@@ -4,3 +4,5 @@
 data/
 __pycache__/
 .venv/
+# VS Code 개인 설정(파이썬 경로)
+.vscode/settings.json

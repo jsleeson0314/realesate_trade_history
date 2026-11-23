@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "비교 화면 실행 (streamlit)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "streamlit",
+      "args": ["run", "app.py"],
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      "name": "데이터 받기 (fetch.py)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/fetch.py",
+      "args": ["안양시", "광명시", "분당구", "수지구", "수원시", "의왕시", "군포시"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ]
+}
