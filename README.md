@@ -11,26 +11,32 @@
 
 ## 처음 한 번만 하는 준비 (Windows)
 
-1. 파이썬이 설치되어 있어야 합니다. 명령 프롬프트(cmd)에서 `python --version`으로 확인하세요.
-2. 이 폴더에서 필요한 패키지를 설치합니다.
+이 프로젝트는 폴더 안에 **전용 파이썬 환경(`.venv`)**을 만들어서 씁니다.
+Anaconda 기본 환경에 패키지를 설치하면 numpy 버전이 바뀌어 다른 작업이 깨질 수 있기 때문입니다.
+
+1. 인증키 파일을 만듭니다. `.streamlit\secrets.toml.example`을 같은 폴더에 `secrets.toml`로 복사하고,
+   공공데이터포털에서 받은 **일반 인증키**를 넣으세요.
+   이 파일은 `.gitignore`에 들어 있어서 GitHub에 올라가지 않습니다.
+2. 전용 환경 만들기 (`run.bat`을 더블클릭하면 자동으로 해 줍니다)
 
    ```
    cd /d D:\AIworking\부동산실거래가조회기
-   python -m pip install -r requirements.txt
+   D:\ananconda3\python.exe -m venv .venv
+   .venv\Scripts\python.exe -m pip install -r requirements.txt
    ```
-
-3. 인증키 파일을 만듭니다. `.streamlit\secrets.toml.example`을 같은 폴더에 `secrets.toml`로 복사하고,
-   공공데이터포털에서 받은 **일반 인증키**를 넣으세요.
-   이 파일은 `.gitignore`에 들어 있어서 GitHub에 올라가지 않습니다.
 
 ## 비교 화면 열기
 
+`run.bat`을 더블클릭하거나, 명령 프롬프트에서:
+
 ```
-cd /d D:\AIworking\부동산실거래가조회기
-python -m streamlit run app.py
+.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-브라우저가 자동으로 열립니다(안 열리면 http://localhost:8501). 끝낼 때는 명령 프롬프트에서 Ctrl+C.
+VS Code에서는 `Ctrl+Shift+P` → "Python: Select Interpreter"에서 `.venv\Scripts\python.exe`를 고른 뒤
+터미널에서 `python -m streamlit run app.py`를 실행하면 됩니다.
+
+브라우저가 자동으로 열립니다(안 열리면 http://localhost:8501). 끝낼 때는 Ctrl+C.
 
 - 왼쪽 **데이터 업데이트**에서 지역을 고르고 **받기**를 누르면 화면에서 바로 데이터를 받습니다.
 - 위쪽 칸에 단지 이름이나 동 이름을 입력해서 비교할 단지를 여러 개 고릅니다.
