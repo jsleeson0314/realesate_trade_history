@@ -2,6 +2,7 @@
 
 사용 예:
     python fetch.py 강남구 송파구            # 최근 36개월
+    python fetch.py 수원시                   # 이름이 겹치는 지역 모두(수원시 4개 구)
     python fetch.py 강남구 --months 60       # 최근 5년
     python fetch.py --list                   # 사용 가능한 지역 이름 보기
 
@@ -32,12 +33,12 @@ def recent_months(n: int) -> list[str]:
     return out
 
 
-def find_region(name: str) -> tuple[str, str]:
+def find_regions(name: str) -> list[tuple[str, str]]:
+    """이름의 일부(예: 수원시)로 찾으면 해당하는 지역을 모두 돌려줍니다."""
     matches = [(k, v) for k, v in REGIONS.items() if name in k or name == v]
-    if len(matches) != 1:
-        options = ", ".join(k for k, _ in matches) or "없음"
-        sys.exit(f"'{name}' 지역을 하나로 찾지 못했습니다. (후보: {options})")
-    return matches[0]
+    if not matches:
+        sys.exit(f"'{name}' 지역을 찾지 못했습니다. python fetch.py --list 로 목록을 확인하세요.")
+    return matches
 
 
 def main() -> None:
@@ -56,8 +57,13 @@ def main() -> None:
     months = recent_months(args.months)
     must_refresh = set(months[:REFRESH_RECENT_MONTHS])
 
+    targets = []
     for name in args.regions:
-        region_name, code = find_region(name)
+        for region in find_regions(name):
+            if region not in targets:
+                targets.append(region)
+
+    for region_name, code in targets:
         done = db.fetched_months(conn, code)
         todo = [ym for ym in months if ym in must_refresh or ym not in done]
         print(f"[{region_name}] {len(todo)}개월 받는 중...")
