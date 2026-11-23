@@ -3,19 +3,16 @@
 실행:  streamlit run app.py
 """
 
-import json
-
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 import analysis
 import db
+import groups
 from fetch import recent_months, REFRESH_RECENT_MONTHS
 from molit_api import fetch_month, load_api_key
 from regions import REGIONS
-
-FAVORITES_FILE = db.DB_PATH.parent / "favorites.json"
 
 st.set_page_config(page_title="아파트 실거래가 비교", page_icon="🏢", layout="wide")
 
@@ -31,18 +28,6 @@ def db_mtime() -> float:
     return db.DB_PATH.stat().st_mtime if db.DB_PATH.exists() else 0.0
 
 
-def load_favorites() -> list[str]:
-    try:
-        return json.loads(FAVORITES_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-
-
-def save_favorites(ids: list[str]) -> None:
-    FAVORITES_FILE.parent.mkdir(exist_ok=True)
-    FAVORITES_FILE.write_text(json.dumps(ids, ensure_ascii=False), encoding="utf-8")
-
-
 # ---------- 사이드바: 데이터 업데이트 ----------
 
 with st.sidebar:
@@ -50,7 +35,7 @@ with st.sidebar:
     st.caption("국토부 API에서 지역별 실거래 데이터를 받아 내 컴퓨터에 저장합니다.")
     regions = st.multiselect("지역", list(REGIONS.keys()))
     months = st.slider("기간(개월)", 12, 120, 36, step=12)
-    if st.button("받기", disabled=not regions, use_container_width=True):
+    if st.button("받기", disabled=not regions, width="stretch"):
         api_key = load_api_key()
         conn = db.connect()
         month_list = recent_months(months)
@@ -77,7 +62,7 @@ with st.sidebar:
             )
         status.insert(0, "지역", status.pop("sgg_cd").map(analysis.CODE_TO_REGION))
         with st.expander("받아 둔 데이터"):
-            st.dataframe(status, hide_index=True, use_container_width=True)
+            st.dataframe(status, hide_index=True, width="stretch")
 
 
 # ---------- 본문 ----------
@@ -92,112 +77,218 @@ if df.empty:
 complexes = analysis.complex_list(df)
 labels = dict(zip(complexes["complex_id"], complexes["complex_label"]))
 counts = dict(zip(complexes["complex_id"], complexes["trades"]))
+ss = st.session_state
 
-if "selected" not in st.session_state:
-    st.session_state.selected = [c for c in load_favorites() if c in labels]
 
-selected = st.multiselect(
-    "비교할 단지 (이름이나 동 이름을 입력해서 검색)",
+def area_key(cid: str) -> str:
+    return f"areas|{cid}"
+
+
+def apply_group(name: str) -> None:
+    """저장된 그룹을 화면 선택 상태로 옮깁니다. (버튼 콜백에서 호출)"""
+    picks = [p for p in groups.get(name) if p["complex_id"] in labels]
+    ss.selected = [p["complex_id"] for p in picks]
+    for p in picks:
+        have = analysis.area_counts(df, p["complex_id"])
+        ss[area_key(p["complex_id"])] = [a for a in p.get("areas", []) if a in have]
+    ss.group_name = name
+    groups.set_last(name)
+
+
+def current_picks() -> list[dict]:
+    return [{"complex_id": c, "areas": list(ss.get(area_key(c), []))} for c in ss.get("selected", [])]
+
+
+def on_save_group() -> None:
+    name = ss.group_name.strip()
+    if not name or not ss.get("selected"):
+        ss.notice = ("warning", "그룹 이름을 적고 단지를 하나 이상 골라 주세요.")
+        return
+    existed = groups.save(name, current_picks())
+    ss.group_pick = name
+    ss.notice = ("success", f"'{name}' 그룹을 {'덮어써서 ' if existed else ''}저장했습니다.")
+
+
+def on_load_group() -> None:
+    if ss.get("group_pick"):
+        apply_group(ss.group_pick)
+        ss.notice = ("success", f"'{ss.group_pick}' 그룹을 불러왔습니다.")
+
+
+def on_delete_group() -> None:
+    name = ss.get("group_pick")
+    if name:
+        groups.delete(name)
+        ss.group_pick = None
+        ss.notice = ("success", f"'{name}' 그룹을 지웠습니다.")
+
+
+def on_same_area() -> None:
+    a = ss.get("same_area")
+    if a is None:
+        return
+    missing = []
+    for c in ss.get("selected", []):
+        if a in analysis.area_counts(df, c):
+            ss[area_key(c)] = [a]
+        else:
+            missing.append(labels[c])
+    if missing:
+        ss.notice = ("warning", f"전용 {a}㎡가 없는 단지는 그대로 두었습니다: " + ", ".join(missing))
+
+
+# 처음 열 때: 마지막으로 쓴 그룹을 자동으로 불러옵니다.
+if "selected" not in ss:
+    ss.selected = []
+    last = groups.last_used()
+    if last in groups.names():
+        apply_group(last)
+        ss.group_pick = last
+
+# ---------- 그룹 저장·불러오기 ----------
+
+with st.expander("📁 비교 그룹 (단지 + 평형 묶음 저장·불러오기)", expanded=not ss.selected):
+    names = groups.names()
+    if ss.get("group_pick") not in names:
+        ss.group_pick = names[0] if names else None
+    g1, g2, g3 = st.columns([3, 1, 1], vertical_alignment="bottom")
+    g1.selectbox("저장된 그룹", names, key="group_pick", placeholder="저장된 그룹이 없습니다")
+    g2.button("불러오기", on_click=on_load_group, disabled=not names, width="stretch")
+    g3.button("🗑️ 삭제", on_click=on_delete_group, disabled=not names, width="stretch")
+    h1, h2 = st.columns([4, 1], vertical_alignment="bottom")
+    h1.text_input("지금 고른 단지·평형을 그룹으로 저장", key="group_name", placeholder="예: 안양 갈아타기 후보")
+    h2.button("💾 저장", on_click=on_save_group, disabled=not ss.selected, width="stretch")
+    st.caption("같은 이름으로 저장하면 덮어씁니다. 마지막으로 쓴 그룹은 다음에 열 때 자동으로 불러옵니다.")
+
+if "notice" in ss:
+    kind, msg = ss.pop("notice")
+    (st.success if kind == "success" else st.warning)(msg)
+
+# ---------- 단지 고르기 ----------
+
+st.multiselect(
+    "① 비교할 단지 (이름이나 동 이름을 입력해서 검색)",
     options=list(complexes["complex_id"]),
     format_func=lambda c: f"{labels[c]} · 거래 {counts[c]}건",
     key="selected",
     placeholder="예: 평촌더샵, 철산, 래미안",
 )
-
-col_a, col_b, _ = st.columns([1.3, 1.3, 3])
-if col_a.button("⭐ 관심 단지로 저장", disabled=not selected):
-    save_favorites(selected)
-    st.toast("관심 단지를 저장했습니다. 다음에 열면 자동으로 선택됩니다.")
-if col_b.button("관심 단지 불러오기"):
-    st.session_state.selected = [c for c in load_favorites() if c in labels]
-    st.rerun()
+selected = ss.selected
 
 if not selected:
     st.info("위에서 비교할 단지를 골라 주세요. 여러 개를 고르면 한 화면에서 나란히 비교합니다.")
     st.stop()
 
-sel_df = df[df["complex_id"].isin(selected)]
-# 그래프마다 같은 단지는 같은 색으로
-palette = px.colors.qualitative.Plotly
-colors = {labels[c]: palette[i % len(palette)] for i, c in enumerate(selected)}
+# ---------- 단지별 평형 고르기 ----------
 
-# 단지 요약 카드
-cols = st.columns(min(len(selected), 4))
-for i, cid in enumerate(selected):
-    g = sel_df[sel_df["complex_id"] == cid].sort_values("deal_date")
-    if g.empty:
-        continue
+st.markdown("**② 단지마다 비교할 평형(전용면적) 고르기** · 비워 두면 그 단지의 전체 평형")
+for cid in selected:
+    have = analysis.area_counts(df, cid)
+    key = area_key(cid)
+    if key in ss:  # 다른 단지에 없는 평형이 남아 있으면 정리
+        ss[key] = [a for a in ss[key] if a in have]
+    c1, c2 = st.columns([2, 3], vertical_alignment="center")
+    c1.markdown(f"{labels[cid]}")
+    c2.multiselect(
+        f"{labels[cid]} 평형",
+        options=sorted(have),
+        format_func=lambda a, h=have: f"{a}㎡ ({a / analysis.PYEONG_M2:.0f}평) · {h[a]}건",
+        key=key,
+        placeholder="전체 평형",
+        label_visibility="collapsed",
+    )
+
+all_areas = sorted({a for c in selected for a in analysis.area_counts(df, c)})
+s1, s2, _ = st.columns([2, 1.2, 2.8], vertical_alignment="bottom")
+s1.selectbox(
+    "모든 단지를 같은 평형으로 맞추기",
+    all_areas,
+    index=all_areas.index(84) if 84 in all_areas else 0,
+    format_func=lambda a: f"전용 {a}㎡ ({a / analysis.PYEONG_M2:.0f}평)",
+    key="same_area",
+)
+s2.button("한꺼번에 적용", on_click=on_same_area, width="stretch")
+
+picks = current_picks()
+sel_df = analysis.build_series(df, picks)
+if sel_df.empty:
+    st.warning("고른 단지·평형의 거래가 없습니다.")
+    st.stop()
+series_names = list(sel_df["series"].cat.categories)
+
+# 그래프마다 같은 시리즈(단지+평형)는 같은 색으로
+palette = px.colors.qualitative.Plotly
+colors = {s: palette[i % len(palette)] for i, s in enumerate(series_names)}
+
+st.divider()
+
+# 요약 카드 (단지+평형마다 한 장)
+cols = st.columns(min(len(series_names), 4))
+for i, name in enumerate(series_names):
+    g = sel_df[sel_df["series"] == name].sort_values("deal_date")
     last = g.iloc[-1]
     recent = g[g["deal_date"] >= g["deal_date"].max() - pd.DateOffset(months=12)]
     with cols[i % len(cols)]:
         st.metric(
-            labels[cid],
+            name,
             f"{last['price_eok']:.2f}억",
-            help=f"최근 거래: {last['deal_date'].date()} · {last['area_label']} · {last['floor']}층",
+            help=f"{last['complex_label']} · 최근 거래: {last['deal_date'].date()} · {last['area_label']} · {last['floor']}층",
         )
         st.caption(
-            f"{int(last['build_year'])}년 준공 · 최근 12개월 평당가(전용) "
-            f"{recent['price_per_pyeong'].median():,.0f}만원 · {len(recent)}건"
+            f"{int(last['build_year'])}년 준공 · 최근 12개월 중앙값 {recent['price_eok'].median():.2f}억 · "
+            f"평당가(전용) {recent['price_per_pyeong'].median():,.0f}만원 · {len(recent)}건"
         )
 
-tab_trend, tab_area, tab_ppp, tab_list = st.tabs(["📈 시세 추이", "📐 평형별 비교", "💰 평당가 비교", "📋 최근 거래"])
+tab_trend, tab_area, tab_ppp, tab_list = st.tabs(["📈 시세 추이", "📐 평형별 표", "💰 평당가 비교", "📋 최근 거래"])
 
 with tab_trend:
-    c1, c2, c3 = st.columns(3)
-    area_types = sorted(sel_df["area_type"].unique())
-    area_choice = c1.selectbox(
-        "평형",
-        ["전체"] + area_types,
-        format_func=lambda a: "전체 평형" if a == "전체" else f"전용 {a}㎡ ({a / analysis.PYEONG_M2:.0f}평)",
-        index=(area_types.index(84) + 1) if 84 in area_types else 0,
-    )
-    metric = c2.radio("기준", ["거래가(억)", "평당가(만원)"], horizontal=True)
-    show_points = c3.checkbox("개별 거래 점 표시", value=True)
+    c1, c2 = st.columns(2)
+    metric = c1.radio("기준", ["거래가(억)", "평당가(만원)"], horizontal=True)
+    show_points = c2.checkbox("개별 거래 점 표시", value=True)
 
-    area_filter = None if area_choice == "전체" else int(area_choice)
-    trend = analysis.monthly_trend(df, selected, area_filter)
+    trend = analysis.monthly_trend(sel_df)
     ycol = "price_eok" if metric == "거래가(억)" else "price_per_pyeong"
-    if trend.empty:
-        st.warning("선택한 평형의 거래가 없습니다.")
-    else:
-        fig = px.line(
-            trend, x="month", y=ycol, color="complex_label", markers=True,
-            labels={"month": "", ycol: metric, "complex_label": "단지"},
-            hover_data={"trades": True}, color_discrete_map=colors,
+    fig = px.line(
+        trend, x="month", y=ycol, color="series", markers=True,
+        labels={"month": "", ycol: metric, "series": ""},
+        hover_data={"trades": True}, color_discrete_map=colors,
+        category_orders={"series": series_names},
+    )
+    if show_points:
+        pts = sel_df.assign(series=sel_df["series"].astype(str))
+        scatter = px.scatter(
+            pts, x="deal_date", y=ycol, color="series", opacity=0.3, color_discrete_map=colors,
+            hover_data={"area_label": True, "floor": True, "series": False},
         )
-        if show_points:
-            pts = sel_df if area_filter is None else sel_df[sel_df["area_type"] == area_filter]
-            scatter = px.scatter(
-                pts, x="deal_date", y=ycol, color="complex_label", opacity=0.3, color_discrete_map=colors,
-                hover_data={"area_label": True, "floor": True, "complex_label": False},
-            )
-            for tr in scatter.data:
-                tr.showlegend = False
-                fig.add_trace(tr)
-        fig.update_layout(height=480, legend=dict(orientation="h", y=-0.15), hovermode="closest")
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("선은 월별 거래가의 중앙값, 흐린 점은 개별 거래입니다. 평당가는 전용면적 기준입니다.")
+        for tr in scatter.data:
+            tr.showlegend = False
+            fig.add_trace(tr)
+    fig.update_layout(height=480, legend=dict(orientation="h", y=-0.15), hovermode="closest")
+    st.plotly_chart(fig, width="stretch")
+    st.caption("선은 월별 거래가의 중앙값, 흐린 점은 개별 거래입니다. 평당가는 전용면적 기준입니다.")
 
 with tab_area:
     months_back = st.select_slider("최근 몇 개월 기준", [6, 12, 24, 36], value=12)
-    st.dataframe(analysis.area_summary(df, selected, months_back), hide_index=True, use_container_width=True)
+    st.dataframe(analysis.area_summary(sel_df, months_back), hide_index=True, width="stretch")
+    st.caption("②에서 고른 평형만 나옵니다. 단지의 모든 평형을 보려면 그 단지의 평형 칸을 비워 두세요.")
 
 with tab_ppp:
     cutoff = sel_df["deal_date"].max() - pd.DateOffset(months=12)
     ppp = (
         sel_df[sel_df["deal_date"] >= cutoff]
-        .groupby("complex_label")["price_per_pyeong"].median()
+        .groupby("series", observed=True)["price_per_pyeong"].median()
         .sort_values(ascending=False).reset_index()
     )
+    ppp["series"] = ppp["series"].astype(str)
     fig = px.bar(
-        ppp, x="price_per_pyeong", y="complex_label", orientation="h", text_auto=",.0f",
-        color="complex_label", color_discrete_map=colors,
-        labels={"price_per_pyeong": "평당가 중앙값(만원, 전용 기준)", "complex_label": ""},
+        ppp, x="price_per_pyeong", y="series", orientation="h", text_auto=",.0f",
+        color="series", color_discrete_map=colors,
+        labels={"price_per_pyeong": "평당가 중앙값(만원, 전용 기준)", "series": ""},
     )
     fig.update_layout(height=120 + 50 * len(ppp), yaxis=dict(autorange="reversed"), showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     st.caption("최근 12개월 거래의 평당가 중앙값입니다. 호갱노노 등은 공급면적 기준이라 이보다 낮게 나옵니다.")
 
 with tab_list:
     limit = st.select_slider("표시 건수", [20, 50, 100, 300], value=50)
-    st.dataframe(analysis.recent_trades(df, selected, limit), hide_index=True, use_container_width=True)
+    st.dataframe(analysis.recent_trades(sel_df, limit), hide_index=True, width="stretch")
