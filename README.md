@@ -8,7 +8,7 @@
 - [x] 2단계: 단지 검색과 데이터 정리 (`analysis.py`)
 - [x] 3단계: 비교 화면 (`app.py`, Streamlit) 첫 버전
 - [x] 비교 그룹 저장, 단지별 평형 골라 비교
-- [ ] 4단계: 공유 준비
+- [x] 4단계: 인터넷에 올리기 (Streamlit Community Cloud, 비밀번호 화면) → [DEPLOY.md](DEPLOY.md)
 
 ## 처음 한 번만 하는 준비 (Windows)
 
@@ -84,3 +84,5 @@ python fetch.py 안양시 수원시 분당구      # 시 이름으로 쓰면 소
 | `molit_api.py` | 국토부 API 호출과 XML 해석 |
 | `db.py` | SQLite 저장 |
 | `regions.py` | 시군구 이름과 코드 목록 |
+| `seed/` | 인터넷 버전이 처음 켜질 때 쓰는 데이터 묶음 (`trades.db.gz`, `groups.json`) |
+| `DEPLOY.md` | 인터넷에 올리는 방법 (Streamlit Community Cloud) |

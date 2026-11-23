@@ -3,6 +3,11 @@
 실행:  streamlit run app.py
 """
 
+import gzip
+import json
+import shutil
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -15,6 +20,72 @@ from molit_api import fetch_month, load_api_key
 from regions import REGIONS
 
 st.set_page_config(page_title="아파트 실거래가 비교", page_icon="🏢", layout="wide")
+
+
+# ---------- 비밀번호 (인터넷에 올렸을 때만) ----------
+
+def secret(name: str) -> str | None:
+    """secrets.toml(내 컴퓨터) 또는 Streamlit Cloud의 Secrets 설정에서 값을 읽습니다."""
+    try:
+        value = st.secrets.get(name)
+    except Exception:  # secrets 파일이 아예 없을 때
+        return None
+    return str(value).strip() if value else None
+
+
+def password_gate() -> None:
+    """APP_PASSWORD가 설정돼 있으면 비밀번호를 맞혀야 화면이 보입니다.
+    내 컴퓨터의 secrets.toml에는 APP_PASSWORD를 안 넣으면 비밀번호 없이 열립니다."""
+    password = secret("APP_PASSWORD")
+    if not password or st.session_state.get("authed"):
+        return
+    st.title("🏢 아파트 실거래가 비교")
+    with st.form("login"):
+        typed = st.text_input("비밀번호", type="password")
+        ok = st.form_submit_button("들어가기")
+    if ok and typed == password:
+        st.session_state.authed = True
+        st.rerun()
+    if ok:
+        st.error("비밀번호가 틀렸습니다.")
+    st.stop()
+
+
+password_gate()
+
+
+# ---------- 처음 켤 때: 저장소에 함께 올려 둔 데이터로 시작 ----------
+# 인터넷(Streamlit Cloud)에서는 data 폴더가 비어 있는 채로 시작하고, 앱이 다시 켜질 때마다 초기화됩니다.
+# 그래서 GitHub에 올려 둔 seed/ 폴더의 데이터(압축)를 풀어서 씁니다. 내 컴퓨터에서는 data에 이미 있으므로 건너뜀.
+
+SEED_DIR = Path(__file__).parent / "seed"
+
+
+@st.cache_resource
+def restore_seed() -> None:
+    db.DB_PATH.parent.mkdir(exist_ok=True)
+    seed_db = SEED_DIR / "trades.db.gz"
+    if not db.DB_PATH.exists() and seed_db.exists():
+        with gzip.open(seed_db, "rb") as src, open(db.DB_PATH, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+    seed_groups = SEED_DIR / "groups.json"
+    if not groups.GROUPS_FILE.exists() and seed_groups.exists():
+        shutil.copyfile(seed_groups, groups.GROUPS_FILE)
+
+
+restore_seed()
+
+
+def api_key() -> str:
+    return secret("MOLIT_API_KEY") or load_api_key()
+
+
+def download(conn, jobs: list[tuple[str, str, str]]) -> None:
+    key = api_key()
+    bar = st.progress(0.0)
+    for i, (name, code, ym) in enumerate(jobs, 1):
+        bar.progress(i / len(jobs), text=f"{name} {ym[:4]}.{ym[4:]}")
+        db.save_month(conn, code, ym, fetch_month(key, code, ym))
 
 
 # ---------- 데이터 읽기 ----------
@@ -36,7 +107,6 @@ with st.sidebar:
     regions = st.multiselect("지역", list(REGIONS.keys()))
     months = st.slider("기간(개월)", 12, 120, 36, step=12)
     if st.button("받기", disabled=not regions, width="stretch"):
-        api_key = load_api_key()
         conn = db.connect()
         month_list = recent_months(months)
         refresh = set(month_list[:REFRESH_RECENT_MONTHS])
@@ -45,12 +115,21 @@ with st.sidebar:
             code = REGIONS[name]
             done = db.fetched_months(conn, code)
             jobs += [(name, code, ym) for ym in month_list if ym in refresh or ym not in done]
-        bar = st.progress(0.0)
-        for i, (name, code, ym) in enumerate(jobs, 1):
-            bar.progress(i / len(jobs), text=f"{name} {ym[:4]}.{ym[4:]}")
-            db.save_month(conn, code, ym, fetch_month(api_key, code, ym))
+        download(conn, jobs)
         conn.close()
         st.success(f"{len(jobs)}개월치 받기 완료")
+        st.rerun()
+
+    if db.DB_PATH.exists() and st.button(
+        f"🔄 받아 둔 지역 모두 최신화 (최근 {REFRESH_RECENT_MONTHS}개월)", width="stretch"
+    ):
+        conn = db.connect()
+        codes = [r[0] for r in conn.execute("SELECT DISTINCT sgg_cd FROM fetched_months")]
+        recent = recent_months(REFRESH_RECENT_MONTHS)
+        jobs = [(analysis.CODE_TO_REGION.get(c, c), c, ym) for c in codes for ym in recent]
+        download(conn, jobs)
+        conn.close()
+        st.success(f"{len(codes)}개 지역 최신화 완료")
         st.rerun()
 
     if db.DB_PATH.exists():
@@ -159,6 +238,26 @@ with st.expander("📁 비교 그룹 (단지 + 평형 묶음 저장·불러오�
     h1.text_input("지금 고른 단지·평형을 그룹으로 저장", key="group_name", placeholder="예: 안양 갈아타기 후보")
     h2.button("💾 저장", on_click=on_save_group, disabled=not ss.selected, width="stretch")
     st.caption("같은 이름으로 저장하면 덮어씁니다. 마지막으로 쓴 그룹은 다음에 열 때 자동으로 불러옵니다.")
+    with st.popover("📤 그룹 파일 내보내기·가져오기"):
+        st.caption(
+            "인터넷 버전은 앱이 다시 켜지면 새로 저장한 그룹이 사라질 수 있습니다. "
+            "중요한 그룹은 파일로 내려받아 두었다가 다시 올리세요."
+        )
+        st.download_button(
+            "groups.json 내려받기",
+            data=json.dumps(groups.export(), ensure_ascii=False, indent=2),
+            file_name="groups.json",
+            mime="application/json",
+            width="stretch",
+        )
+        uploaded = st.file_uploader("groups.json 올리기 (같은 이름 그룹은 덮어씀)", type="json")
+        if uploaded is not None and st.button("올린 파일의 그룹 합치기", width="stretch"):
+            try:
+                added = groups.merge(json.loads(uploaded.getvalue().decode("utf-8")))
+                ss.notice = ("success", f"그룹 {added}개를 가져왔습니다.")
+            except (ValueError, KeyError, TypeError):
+                ss.notice = ("warning", "groups.json 형식이 아닙니다.")
+            st.rerun()
 
 if "notice" in ss:
     kind, msg = ss.pop("notice")

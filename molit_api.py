@@ -3,6 +3,7 @@
 API 하나의 호출은 "시군구 1곳 + 1개월"치 데이터만 돌려줍니다.
 """
 
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -19,6 +20,9 @@ SECRETS_FILE = Path(__file__).parent / ".streamlit" / "secrets.toml"
 
 
 def load_api_key() -> str:
+    # 인터넷(Streamlit Cloud)에서는 Secrets 설정값이 환경변수로도 들어옵니다.
+    if os.environ.get("MOLIT_API_KEY"):
+        return os.environ["MOLIT_API_KEY"].strip()
     if not SECRETS_FILE.exists():
         raise RuntimeError(
             f"{SECRETS_FILE} 파일이 없습니다. secrets.toml.example을 복사해서 인증키를 넣어주세요."
