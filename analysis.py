@@ -38,9 +38,7 @@ def load_trades(include_cancelled: bool = False) -> pd.DataFrame:
     df["price_per_pyeong"] = df["price_manwon"] / df["pyeong"]  # 전용 평당가(만원)
     # 평형 묶기: 전용 84.97㎡, 84.43㎡처럼 소수점만 다른 면적은 같은 평형(84㎡)으로 봅니다.
     df["area_type"] = df["area_m2"].astype(int)
-    df["area_label"] = df.apply(
-        lambda r: f"전용 {r.area_type}㎡ ({r.area_type / PYEONG_M2:.0f}평)", axis=1
-    )
+    df["area_label"] = df["area_type"].map(area_label)
     return df
 
 
@@ -75,19 +73,63 @@ def search_complexes(query: str, df: pd.DataFrame | None = None) -> pd.DataFrame
     return complexes[mask]
 
 
-def monthly_trend(df: pd.DataFrame, complex_ids: list[str], area_type: int | None = None) -> pd.DataFrame:
-    """단지별 월별 거래가 중앙값과 평당가 중앙값.
+def area_label(area_type: int) -> str:
+    return f"전용 {area_type}㎡ ({area_type / PYEONG_M2:.0f}평)"
+
+
+def build_series(df: pd.DataFrame, picks: list[dict]) -> pd.DataFrame:
+    """비교할 '단지 + 평형' 묶음(시리즈)만 골라내고 series 열을 붙입니다.
+
+    picks 예: [{"complex_id": "...도덕파크타운2단지", "areas": [49]},
+               {"complex_id": "...꽃뫼마을신안", "areas": []}]   # 빈 목록 = 전체 평형
+    평형을 여러 개 고르면 평형마다 따로 한 줄(시리즈)이 됩니다.
+    series 열은 고른 순서대로 정렬되는 카테고리입니다.
+    """
+    sub = df[df["complex_id"].isin([p["complex_id"] for p in picks])]
+    if sub.empty:
+        return sub.assign(series=pd.Series(dtype="object"))
+
+    # 이름이 같은 단지가 다른 동네에 있으면 동네까지 붙여서 구분합니다.
+    names = sub.drop_duplicates("complex_id").set_index("complex_id")
+    short = names["apt_nm"]
+    dup = short.duplicated(keep=False)
+    short = short.where(~dup, names["complex_label"])
+
+    parts, order = [], []
+    for p in picks:
+        cid = p["complex_id"]
+        if cid not in short.index:
+            continue
+        g = sub[sub["complex_id"] == cid]
+        areas = p.get("areas") or []
+        if not areas:
+            name = f"{short[cid]} · 전체 평형"
+            parts.append(g.assign(series=name))
+            order.append(name)
+            continue
+        for a in areas:
+            name = f"{short[cid]} · {a}㎡({a / PYEONG_M2:.0f}평)"
+            ga = g[g["area_type"] == a]
+            if not ga.empty:
+                parts.append(ga.assign(series=name))
+                order.append(name)
+    if not parts:
+        return sub.iloc[0:0].assign(series=pd.Series(dtype="object"))
+    out = pd.concat(parts)
+    out["series"] = pd.Categorical(out["series"], categories=order, ordered=True)
+    return out
+
+
+def monthly_trend(sub: pd.DataFrame) -> pd.DataFrame:
+    """시리즈(단지+평형)별 월별 거래가 중앙값과 평당가 중앙값.
 
     한 달에 거래가 여러 건이면 층·향 차이가 커서 평균보다 중앙값이 덜 흔들립니다.
     """
-    sub = df[df["complex_id"].isin(complex_ids)]
-    if area_type is not None:
-        sub = sub[sub["area_type"] == area_type]
     if sub.empty:
         return pd.DataFrame()
     sub = sub.assign(month=sub["deal_date"].dt.to_period("M").dt.to_timestamp())
-    return (
-        sub.groupby(["complex_label", "month"])
+    out = (
+        sub.groupby(["series", "month"], observed=True)
         .agg(
             price_eok=("price_eok", "median"),
             price_per_pyeong=("price_per_pyeong", "median"),
@@ -95,22 +137,23 @@ def monthly_trend(df: pd.DataFrame, complex_ids: list[str], area_type: int | Non
         )
         .reset_index()
     )
+    out["series"] = out["series"].astype(str)
+    return out
 
 
-def area_summary(df: pd.DataFrame, complex_ids: list[str], recent_months: int = 12) -> pd.DataFrame:
+def area_summary(sub: pd.DataFrame, recent_months: int = 12) -> pd.DataFrame:
     """단지·평형별 요약: 최근 거래가, 최근 N개월 평균·최고가, 평당가, 거래 수."""
-    sub = df[df["complex_id"].isin(complex_ids)]
     if sub.empty:
         return pd.DataFrame()
     cutoff = sub["deal_date"].max() - pd.DateOffset(months=recent_months)
     rows = []
-    for (label, area_label, area_type), g in sub.groupby(["complex_label", "area_label", "area_type"]):
+    for (label, area_type), g in sub.groupby(["complex_label", "area_type"]):
         g = g.sort_values("deal_date")
         recent = g[g["deal_date"] >= cutoff]
         last = g.iloc[-1]
         rows.append({
             "단지": label,
-            "평형": area_label,
+            "평형": area_label(area_type),
             "area_type": area_type,
             "최근 거래일": last["deal_date"].date(),
             "최근 거래가(억)": round(last["price_eok"], 2),
@@ -124,9 +167,9 @@ def area_summary(df: pd.DataFrame, complex_ids: list[str], recent_months: int = 
     return pd.DataFrame(rows).sort_values(["단지", "area_type"]).drop(columns="area_type")
 
 
-def recent_trades(df: pd.DataFrame, complex_ids: list[str], limit: int = 50) -> pd.DataFrame:
-    """선택한 단지들의 최근 거래 목록."""
-    sub = df[df["complex_id"].isin(complex_ids)].sort_values("deal_date", ascending=False).head(limit)
+def recent_trades(sub: pd.DataFrame, limit: int = 50) -> pd.DataFrame:
+    """고른 단지·평형의 최근 거래 목록."""
+    sub = sub.sort_values("deal_date", ascending=False).head(limit)
     return pd.DataFrame({
         "거래일": sub["deal_date"].dt.date,
         "단지": sub["complex_label"],
@@ -137,3 +180,9 @@ def recent_trades(df: pd.DataFrame, complex_ids: list[str], limit: int = 50) -> 
         "평당가(만원)": sub["price_per_pyeong"].round(0).astype(int),
         "거래 방식": sub["dealing_type"],
     })
+
+
+def area_counts(df: pd.DataFrame, complex_id: str) -> dict[int, int]:
+    """한 단지의 평형별 거래 수 {84: 30, 72: 16, ...} (거래 많은 순)."""
+    s = df.loc[df["complex_id"] == complex_id, "area_type"].value_counts()
+    return {int(a): int(n) for a, n in s.items()}
