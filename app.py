@@ -366,6 +366,10 @@ series_names = list(sel_df["series"].cat.categories)
 BOTH = "평형별가격 (평당가)"
 
 
+# 그래프에 마우스를 올렸을 때 뜨는 설명 상자: 반투명이라 뒤의 선이 비쳐 보입니다.
+HOVER_STYLE = dict(bgcolor="rgba(255,255,255,0.7)", font=dict(color="#333", size=12))
+
+
 def both_label(price_eok: float, per_pyeong: float) -> str:
     """그래프에 함께 적는 글자: 9.20억 (3,450만)"""
     return f"{price_eok:.2f}억 ({per_pyeong:,.0f}만)"
@@ -410,19 +414,31 @@ with tab_trend:
     fig = px.line(
         trend, x="month", y=ycol, color="series", markers=True,
         labels={"month": "", ycol: yname, "series": "", "label": "거래가 (평당가)"},
-        hover_data={"trades": True, "label": True}, color_discrete_map=colors,
+        custom_data=["label", "trades"], color_discrete_map=colors,
         category_orders={"series": series_names},
     )
+    fig.update_traces(hovertemplate=(
+        "<b>%{fullData.name}</b><br>"
+        "%{x|%Y년 %m월} 중앙값<br>"
+        "거래가 (평당가) %{customdata[0]}<br>"
+        "거래 %{customdata[1]}건<extra></extra>"
+    ))
     if show_points:
         pts = sel_df.assign(series=sel_df["series"].astype(str))
         pts["label"] = [both_label(p, q) for p, q in zip(pts["price_eok"], pts["price_per_pyeong"])]
         scatter = px.scatter(
             pts, x="deal_date", y=ycol, color="series", opacity=0.3, color_discrete_map=colors,
-            hover_data={"area_label": True, "floor": True, "label": True, "series": False},
-            labels={"label": "거래가 (평당가)"},
+            custom_data=["label", "area_label", "floor"],
         )
         for tr in scatter.data:
             tr.showlegend = False
+            tr.hovertemplate = (
+                "<b>%{fullData.name}</b><br>"
+                "거래일 %{x|%Y-%m-%d}<br>"
+                "거래가 (평당가) %{customdata[0]}<br>"
+                "면적 %{customdata[1]}<br>"
+                "층 %{customdata[2]}층<extra></extra>"
+            )
             fig.add_trace(tr)
     if metric == BOTH:
         every = c2.checkbox("모든 달에 숫자 표시", value=False, help="끄면 각 선의 마지막 달에만 표시합니다.")
@@ -433,7 +449,8 @@ with tab_trend:
                 textposition="top center", textfont=dict(color=colors.get(name), size=11),
                 showlegend=False, hoverinfo="skip",
             )
-    fig.update_layout(height=480, legend=dict(orientation="h", y=-0.15), hovermode="closest")
+    fig.update_layout(height=480, legend=dict(orientation="h", y=-0.15), hovermode="closest",
+                      hoverlabel=HOVER_STYLE)
     st.plotly_chart(fig, width="stretch")
     st.caption(
         "선은 월별 거래가의 중앙값, 흐린 점은 개별 거래입니다. 평당가는 전용면적 기준입니다. "
@@ -458,6 +475,7 @@ with tab_ppp:
         .reset_index()
     )
     ppp["series"] = ppp["series"].astype(str)
+    ppp["hover"] = [both_label(p, q) for p, q in zip(ppp["price_eok"], ppp["price_per_pyeong"])]
     if ppp_mode == BOTH:
         ppp = ppp.sort_values("price_eok", ascending=False)
         ppp["label"] = [both_label(p, q) for p, q in zip(ppp["price_eok"], ppp["price_per_pyeong"])]
@@ -471,12 +489,15 @@ with tab_ppp:
     fig = px.bar(
         ppp, x=xcol, y="series", orientation="h", text=text,
         color="series", color_discrete_map=colors,
-        hover_data={"trades": True, "label": False},
-        labels={xcol: xname, "series": "", "trades": "거래 수"},
+        custom_data=["hover", "trades"],
+        labels={xcol: xname, "series": ""},
         category_orders={"series": list(ppp["series"])},
     )
-    fig.update_traces(textposition="outside", cliponaxis=False)
-    fig.update_layout(height=120 + 50 * len(ppp), showlegend=False,
+    fig.update_traces(
+        textposition="outside", cliponaxis=False,
+        hovertemplate="<b>%{y}</b><br>거래가 (평당가) %{customdata[0]}<br>거래 %{customdata[1]}건<extra></extra>",
+    )
+    fig.update_layout(height=120 + 50 * len(ppp), showlegend=False, hoverlabel=HOVER_STYLE,
                       xaxis=dict(range=[0, ppp[xcol].max() * 1.3]))
     st.plotly_chart(fig, width="stretch")
     st.caption(
