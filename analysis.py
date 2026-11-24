@@ -5,6 +5,7 @@
     >>> analysis.search_complexes("은마")
 """
 
+import re
 import sqlite3
 
 import pandas as pd
@@ -32,7 +33,7 @@ def load_trades(include_cancelled: bool = False) -> pd.DataFrame:
     df["region"] = df["sgg_cd"].map(CODE_TO_REGION).fillna(df["sgg_cd"])
     # 단지 구분: 같은 이름의 단지가 다른 동네에도 있을 수 있어서 지번까지 함께 씁니다.
     df["complex_id"] = df["sgg_cd"] + "|" + df["umd_nm"] + "|" + df["jibun"] + "|" + df["apt_nm"]
-    df["complex_label"] = df["apt_nm"] + " (" + df["region"].str.replace("경기 ", "").str.replace("서울 ", "") + " " + df["umd_nm"] + ")"
+    df["complex_label"] = df["apt_nm"] + " (" + df["region"].map(short_region) + " " + df["umd_nm"] + ")"
     df["price_eok"] = df["price_manwon"] / 10000  # 억원
     df["pyeong"] = df["area_m2"] / PYEONG_M2  # 전용면적 기준 평
     df["price_per_pyeong"] = df["price_manwon"] / df["pyeong"]  # 전용 평당가(만원)
@@ -40,6 +41,14 @@ def load_trades(include_cancelled: bool = False) -> pd.DataFrame:
     df["area_type"] = df["area_m2"].astype(int)
     df["area_label"] = df["area_type"].map(area_label)
     return df
+
+
+def short_region(region: str) -> str:
+    """단지 이름 옆에 붙일 짧은 지역 이름: "경기 안양시 동안구" → "안양시 동안구"."""
+    region = re.sub(r"\s*\(.*\)$", "", region)  # "(2026.6월 이전 거래)" 같은 설명 떼기
+    if region == "세종특별자치시":
+        return "세종"
+    return region.split(" ", 1)[1] if " " in region else region
 
 
 def complex_list(df: pd.DataFrame) -> pd.DataFrame:

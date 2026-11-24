@@ -53,3 +53,29 @@ def save_month(conn: sqlite3.Connection, sgg_cd: str, deal_ym: str, rows: list[d
 def fetched_months(conn: sqlite3.Connection, sgg_cd: str) -> set[str]:
     cur = conn.execute("SELECT deal_ym FROM fetched_months WHERE sgg_cd = ?", (sgg_cd,))
     return {row[0] for row in cur}
+
+
+# ---------- 용량 관리: 필요 없는 데이터 지우기 ----------
+
+def size_mb() -> float:
+    return DB_PATH.stat().st_size / 1024 / 1024 if DB_PATH.exists() else 0.0
+
+
+def delete_data(conn: sqlite3.Connection, sgg_codes: list[str], before_ym: str | None = None) -> int:
+    """고른 지역의 거래를 지웁니다. before_ym(YYYYMM)을 주면 그 달보다 이전 거래만 지웁니다.
+
+    지운 달은 '받은 달' 기록에서도 빠지므로, 나중에 다시 받기를 누르면 새로 받아집니다.
+    지운 거래 수를 돌려줍니다.
+    """
+    if not sgg_codes:
+        return 0
+    marks = ",".join("?" * len(sgg_codes))
+    where, params = f"sgg_cd IN ({marks})", list(sgg_codes)
+    if before_ym:
+        where += " AND deal_ym < ?"
+        params.append(before_ym)
+    deleted = conn.execute(f"DELETE FROM trades WHERE {where}", params).rowcount
+    conn.execute(f"DELETE FROM fetched_months WHERE {where}", params)
+    conn.commit()
+    conn.execute("VACUUM")  # 지운 만큼 파일 크기를 실제로 줄입니다.
+    return deleted
