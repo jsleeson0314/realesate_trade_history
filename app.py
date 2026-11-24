@@ -140,6 +140,29 @@ with st.sidebar:
         st.success(f"{len(codes)}개 지역 최신화 완료")
         st.rerun()
 
+    # 받아 둔 지역을 위에서 고른 기간만큼 채우기 (예: 3개월만 있는데 12개월 고르면 빠진 9개월을 받음)
+    if db.DB_PATH.exists():
+        with db.connect() as conn:
+            done_by_code: dict[str, set[str]] = {}
+            for code, ym in conn.execute("SELECT sgg_cd, deal_ym FROM fetched_months"):
+                done_by_code.setdefault(code, set()).add(ym)
+        period = recent_months(months)
+        fill_jobs = [
+            (analysis.CODE_TO_REGION.get(c, c), c, ym)
+            for c, done in done_by_code.items() for ym in period if ym not in done
+        ]
+        if st.button(
+            f"📥 받아 둔 지역 모두 {months}개월로 채우기 ({len(fill_jobs):,}개월치)",
+            disabled=not fill_jobs, width="stretch",
+            help="위의 기간(개월) 슬라이더만큼, 받아 둔 지역마다 아직 없는 달만 받습니다.",
+        ):
+            with db.connect() as conn:
+                download(conn, fill_jobs)
+            st.session_state.notice = (
+                "success", f"{len(done_by_code)}개 지역의 빠진 {len(fill_jobs):,}개월치를 받았습니다."
+            )
+            st.rerun()
+
     if db.DB_PATH.exists():
         with db.connect() as conn:
             status = pd.read_sql_query(
