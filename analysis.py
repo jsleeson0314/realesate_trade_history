@@ -18,25 +18,48 @@ CODE_TO_REGION = {v: k for k, v in REGIONS.items()}
 
 
 def load_trades(include_cancelled: bool = False) -> pd.DataFrame:
-    """DB의 모든 거래를 표로 읽고 계산용 열을 붙입니다."""
-    if not db.DB_PATH.exists():
-        return pd.DataFrame()
-    with sqlite3.connect(db.DB_PATH) as conn:
-        df = pd.read_sql_query("SELECT * FROM trades", conn)
+    """DB의 모든 매매 거래를 표로 읽고 계산용 열을 붙입니다."""
+    df = _read_table("trades")
     if df.empty:
         return df
     if not include_cancelled:
         df = df[df["cancel_type"] != "O"]
+    return _add_columns(df, "price_manwon")
 
+
+def load_rents() -> pd.DataFrame:
+    """DB의 모든 전월세 계약을 표로 읽습니다.
+
+    매매와 같은 열 이름(price_eok, price_per_pyeong ...)을 보증금 기준으로 붙여서
+    매매용 함수(build_series, monthly_trend ...)를 그대로 쓸 수 있게 합니다.
+    is_jeonse 열: 월세가 0이면 전세.
+    """
+    df = _read_table("rents")
+    if df.empty:
+        return df
+    df = _add_columns(df, "deposit_manwon")
+    df["is_jeonse"] = df["monthly_rent_manwon"] == 0
+    df["rent_kind"] = df["is_jeonse"].map({True: "전세", False: "월세"})
+    return df
+
+
+def _read_table(table: str) -> pd.DataFrame:
+    if not db.DB_PATH.exists():
+        return pd.DataFrame()
+    with db.connect() as conn:  # connect()가 새 표(rents)도 만들어 둡니다.
+        return pd.read_sql_query(f"SELECT * FROM {table}", conn)
+
+
+def _add_columns(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
     df = df.copy()
     df["deal_date"] = pd.to_datetime(df["deal_date"])
     df["region"] = df["sgg_cd"].map(CODE_TO_REGION).fillna(df["sgg_cd"])
     # 단지 구분: 같은 이름의 단지가 다른 동네에도 있을 수 있어서 지번까지 함께 씁니다.
     df["complex_id"] = df["sgg_cd"] + "|" + df["umd_nm"] + "|" + df["jibun"] + "|" + df["apt_nm"]
     df["complex_label"] = df["apt_nm"] + " (" + df["region"].map(short_region) + " " + df["umd_nm"] + ")"
-    df["price_eok"] = df["price_manwon"] / 10000  # 억원
+    df["price_eok"] = df[price_col] / 10000  # 억원 (전월세는 보증금)
     df["pyeong"] = df["area_m2"] / PYEONG_M2  # 전용면적 기준 평
-    df["price_per_pyeong"] = df["price_manwon"] / df["pyeong"]  # 전용 평당가(만원)
+    df["price_per_pyeong"] = df[price_col] / df["pyeong"]  # 전용 평당가(만원)
     # 평형 묶기: 전용 84.97㎡, 84.43㎡처럼 소수점만 다른 면적은 같은 평형(84㎡)으로 봅니다.
     df["area_type"] = df["area_m2"].astype(int)
     df["area_label"] = df["area_type"].map(area_label)
@@ -195,3 +218,57 @@ def area_counts(df: pd.DataFrame, complex_id: str) -> dict[int, int]:
     """한 단지의 평형별 거래 수 {84: 30, 72: 16, ...} (거래 많은 순)."""
     s = df.loc[df["complex_id"] == complex_id, "area_type"].value_counts()
     return {int(a): int(n) for a, n in s.items()}
+
+
+# ---------- 전세 ----------
+
+def jeonse_summary(sale: pd.DataFrame, jeonse: pd.DataFrame, recent_months: int = 12) -> pd.DataFrame:
+    """시리즈(단지+평형)별 최근 N개월 매매가·전세가 중앙값과 전세가율.
+
+    sale, jeonse 모두 build_series를 거친 표(series 열 있음)입니다.
+    기준일은 두 표를 합쳐 가장 최근 계약일입니다.
+    """
+    if jeonse.empty:
+        return pd.DataFrame()
+    end = max(jeonse["deal_date"].max(), sale["deal_date"].max() if not sale.empty else jeonse["deal_date"].max())
+    cutoff = end - pd.DateOffset(months=recent_months)
+    rows = []
+    for name in jeonse["series"].cat.categories:
+        j = jeonse[(jeonse["series"] == name) & (jeonse["deal_date"] >= cutoff)]
+        s = sale[(sale["series"] == name) & (sale["deal_date"] >= cutoff)] if not sale.empty else sale
+        if j.empty and s.empty:
+            continue
+        sale_med = s["price_eok"].median() if len(s) else None
+        j_med = j["price_eok"].median() if len(j) else None
+        if j_med is None:
+            continue  # 전세 계약이 없는 단지·평형은 표에서 뺍니다.
+        j_new = j[j["contract_type"] == "신규"]
+        rows.append({
+            "series": name,
+            "매매 중앙값(억)": round(sale_med, 2) if sale_med else None,
+            "전세 중앙값(억)": round(j_med, 2) if j_med else None,
+            "전세 신규계약 중앙값(억)": round(j_new["price_eok"].median(), 2) if len(j_new) else None,
+            "전세가율(%)": round(j_med / sale_med * 100, 1) if (sale_med and j_med) else None,
+            "매매-전세 차이(억)": round(sale_med - j_med, 2) if (sale_med and j_med) else None,
+            "매매 건수": len(s),
+            "전세 건수": len(j),
+            "평당 전세가(만원)": round(j["price_per_pyeong"].median()) if len(j) else None,
+        })
+    return pd.DataFrame(rows)
+
+
+def recent_rents(sub: pd.DataFrame, limit: int = 50) -> pd.DataFrame:
+    """고른 단지·평형의 최근 전월세 계약 목록."""
+    sub = sub.sort_values("deal_date", ascending=False).head(limit)
+    return pd.DataFrame({
+        "계약일": sub["deal_date"].dt.date,
+        "단지": sub["complex_label"],
+        "평형": sub["area_label"],
+        "층": sub["floor"],
+        "구분": sub["rent_kind"],
+        "보증금(억)": sub["price_eok"].round(2),
+        "월세(만원)": sub["monthly_rent_manwon"],
+        "신규/갱신": sub["contract_type"],
+        "계약기간": sub["contract_term"],
+        "종전 보증금(억)": (sub["pre_deposit_manwon"] / 10000).round(2).where(sub["pre_deposit_manwon"] > 0),
+    })

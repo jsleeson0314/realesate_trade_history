@@ -1,6 +1,8 @@
-"""국토교통부 아파트 매매 실거래가 API를 호출해서 거래 목록을 받아오는 모듈.
+"""국토교통부 아파트 매매·전월세 실거래가 API를 호출해서 거래 목록을 받아오는 모듈.
 
 API 하나의 호출은 "시군구 1곳 + 1개월"치 데이터만 돌려줍니다.
+매매(fetch_month)와 전월세(fetch_rent_month)는 공공데이터포털에서 각각 활용신청을 해야 합니다.
+인증키는 같은 키를 씁니다.
 """
 
 import os
@@ -12,6 +14,7 @@ from pathlib import Path
 import requests
 
 ENDPOINT = "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade"
+RENT_ENDPOINT = "https://apis.data.go.kr/1613000/RTMSDataSvcAptRent/getRTMSDataSvcAptRent"
 ROWS_PER_PAGE = 1000
 
 # 프로젝트 폴더 안의 .streamlit/secrets.toml 파일에서 인증키를 읽습니다.
@@ -39,6 +42,23 @@ def _text(item: ET.Element, tag: str) -> str:
     return (node.text or "").strip() if node is not None else ""
 
 
+def _int(text: str) -> int:
+    text = text.replace(",", "").strip()
+    return int(float(text)) if text else 0
+
+
+def _deal_date(item: ET.Element) -> str:
+    return "{}-{:02d}-{:02d}".format(
+        _text(item, "dealYear"),
+        int(_text(item, "dealMonth") or 0),
+        int(_text(item, "dealDay") or 0),
+    )
+
+
+class ServiceNotApprovedError(RuntimeError):
+    """인증키에 이 API의 활용신청(승인)이 안 되어 있을 때."""
+
+
 def _parse_item(item: ET.Element) -> dict:
     return {
         "sgg_cd": _text(item, "sggCd"),
@@ -61,8 +81,37 @@ def _parse_item(item: ET.Element) -> dict:
     }
 
 
-def fetch_month(api_key: str, lawd_cd: str, deal_ym: str, retries: int = 3) -> list[dict]:
-    """시군구 코드(5자리)와 계약년월(YYYYMM)의 거래를 모두 받아옵니다."""
+def _parse_rent_item(item: ET.Element) -> dict:
+    return {
+        "sgg_cd": _text(item, "sggCd"),
+        "umd_nm": _text(item, "umdNm"),
+        "jibun": _text(item, "jibun"),
+        "apt_nm": _text(item, "aptNm"),
+        "build_year": _int(_text(item, "buildYear")),
+        "area_m2": float(_text(item, "excluUseAr") or 0),  # 전용면적(㎡)
+        "floor": _int(_text(item, "floor")),
+        "deal_date": _deal_date(item),  # 계약일
+        "deposit_manwon": _int(_text(item, "deposit")),  # 보증금(만원)
+        "monthly_rent_manwon": _int(_text(item, "monthlyRent")),  # 월세(만원), 0이면 전세
+        "contract_term": _text(item, "contractTerm"),  # 계약기간 (예: 24.12~26.12)
+        "contract_type": _text(item, "contractType"),  # 신규 / 갱신 (2021년 이전 자료는 빈칸)
+        "use_rr_right": _text(item, "useRRRight"),  # 갱신요구권 사용 여부
+        "pre_deposit_manwon": _int(_text(item, "preDeposit")),  # 종전 보증금
+        "pre_monthly_rent_manwon": _int(_text(item, "preMonthlyRent")),  # 종전 월세
+    }
+
+
+def fetch_month(api_key: str, lawd_cd: str, deal_ym: str, retries: int = 5) -> list[dict]:
+    """시군구 코드(5자리)와 계약년월(YYYYMM)의 매매 거래를 모두 받아옵니다."""
+    return _fetch(ENDPOINT, _parse_item, api_key, lawd_cd, deal_ym, retries)
+
+
+def fetch_rent_month(api_key: str, lawd_cd: str, deal_ym: str, retries: int = 5) -> list[dict]:
+    """시군구 코드(5자리)와 계약년월(YYYYMM)의 전월세 계약을 모두 받아옵니다."""
+    return _fetch(RENT_ENDPOINT, _parse_rent_item, api_key, lawd_cd, deal_ym, retries)
+
+
+def _fetch(endpoint, parse, api_key: str, lawd_cd: str, deal_ym: str, retries: int) -> list[dict]:
     results: list[dict] = []
     page = 1
     while True:
@@ -75,7 +124,13 @@ def fetch_month(api_key: str, lawd_cd: str, deal_ym: str, retries: int = 3) -> l
         }
         for attempt in range(retries):
             try:
-                resp = requests.get(ENDPOINT, params=params, timeout=30)
+                resp = requests.get(endpoint, params=params, timeout=30)
+                if b"SERVICE_KEY_IS_NOT_REGISTERED" in resp.content:
+                    name = "전월세" if endpoint == RENT_ENDPOINT else "매매"
+                    raise ServiceNotApprovedError(
+                        f"인증키에 국토교통부 아파트 {name} 실거래가 자료 활용신청이 안 되어 있습니다. "
+                        "공공데이터포털(data.go.kr)에서 활용신청 후 승인되면(보통 1시간 안) 다시 받아 주세요."
+                    )
                 resp.raise_for_status()
                 root = ET.fromstring(resp.content)
                 break
@@ -90,7 +145,7 @@ def fetch_month(api_key: str, lawd_cd: str, deal_ym: str, retries: int = 3) -> l
             raise RuntimeError(f"API 오류 {code}: {msg} (시군구 {lawd_cd}, {deal_ym})")
 
         items = root.findall("body/items/item")
-        results.extend(_parse_item(it) for it in items)
+        results.extend(parse(it) for it in items)
 
         total = int(root.findtext("body/totalCount", "0") or 0)
         if page * ROWS_PER_PAGE >= total or not items:
